@@ -45,7 +45,7 @@ jobs:
   upload_wheel:
     needs: [build_wheel]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: github.event_name == 'release' && github.event.action == 'published' && github.repository_owner == 'DelfinaCare'
     environment:
         name: pypi
         url: https://pypi.org/p/starlette-gcp-logging
