@@ -12,12 +12,10 @@ The request log entry includes an ``httpRequest`` payload that Cloud Logging
 can parse and surface in the Logs Explorer HTTP-request view.
 """
 
-from __future__ import annotations
-
 import collections.abc
 import logging
 import time
-from typing import Any, Awaitable, Callable
+import typing
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -137,7 +135,7 @@ def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
 
 
 def _find_route_template(
-    router: Any, scope: collections.abc.Mapping[str, Any]
+    router: typing.Any, scope: collections.abc.Mapping[str, typing.Any]
 ) -> str | None:
     """Recursively search *router*'s route table for the path template that
     matches *scope*, e.g. ``'/api/user/{user_id}/task/{task_id}'``.
@@ -224,7 +222,9 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self,
         request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
+        call_next: collections.abc.Callable[
+            [Request], collections.abc.Awaitable[Response]
+        ],
     ) -> Response:
         trace_id, span_id, sampled = _extract_trace_context(request)
         user_email = _extract_iap_user_email(request)

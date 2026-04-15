@@ -10,14 +10,12 @@ logger used inside a request handler automatically inherits the values set by
 GCPRequestLoggingMiddleware without any explicit plumbing.
 """
 
-from __future__ import annotations
-
 import datetime
 import json
 import logging
 import traceback
+import typing
 from contextvars import ContextVar
-from typing import Any
 
 from . import _metadata
 
@@ -118,7 +116,7 @@ class GCPFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         record.message = record.getMessage()
 
-        payload: dict[str, Any] = {
+        payload: dict[str, typing.Any] = {
             "severity": _SEVERITY.get(record.levelno, record.levelname),
             "message": record.message,
             # RFC 3339 timestamp with UTC offset
@@ -191,7 +189,7 @@ class GCPFormatter(logging.Formatter):
 # ---------------------------------------------------------------------------
 
 
-def _json_default(obj: Any) -> Any:
+def _json_default(obj: typing.Any) -> typing.Any:
     """Fallback serialiser for types not handled by the standard encoder."""
     if isinstance(obj, datetime.datetime):
         return obj.isoformat()
