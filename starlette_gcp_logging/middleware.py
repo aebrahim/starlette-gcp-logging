@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.routing import Match
 from starlette.types import ASGIApp
 
 from . import _metadata, formatter
@@ -130,6 +131,58 @@ def _extract_trace_context(request: Request) -> tuple[str, str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Route-template helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_route_template(
+    router: Any, scope: dict[str, Any]
+) -> str | None:
+    """Recursively search *router*'s route table for the path template that
+    matches *scope*, e.g. ``'/api/user/{user_id}/task/{task_id}'``.
+
+    Returns ``None`` when no route matches (e.g. a 404 request).
+
+    ``route.matches()`` is a pure query — it does not mutate *scope* — so
+    calling it before the actual routing happens in ``call_next`` is safe.
+    When a :class:`starlette.routing.Mount` matches, its ``child_scope``
+    carries an updated ``root_path`` that trims the mount prefix; we merge
+    this into a copy of *scope* before recursing so that inner routes see
+    only their own path segment.
+    """
+    for route in getattr(router, "routes", []):
+        match, child_scope = route.matches(scope)
+        if match == Match.NONE:
+            continue
+        if hasattr(route, "endpoint"):
+            # Leaf Route / WebSocketRoute — return its path template.
+            return route.path
+        # Mount — recurse with the child scope so that get_route_path trims
+        # the mount prefix before inner routes try to match.
+        sub = _find_route_template(
+            getattr(route, "app", None), {**scope, **child_scope}
+        )
+        if sub is not None:
+            return route.path + sub
+    return None
+
+
+def _extract_route_path(request: Request) -> str:
+    """Return the matched route path template including any ``root_path``.
+
+    For example, given a request to ``/api/user/123/task/abc`` matched by the
+    route ``/api/user/{user_id}/task/{task_id}``, returns
+    ``"/api/user/{user_id}/task/{task_id}"`` (or
+    ``"/prefix/api/user/{user_id}/task/{task_id}"`` when ``root_path`` is set).
+    Returns ``""`` when no route matches.
+    """
+    app = request.scope.get("app")
+    template = _find_route_template(app, request.scope)
+    root_path = request.scope.get("root_path", "")
+    return root_path + (template or "")
+
+
+# ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
 
@@ -172,6 +225,7 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         trace_id, span_id, sampled = _extract_trace_context(request)
         user_email = _extract_iap_user_email(request)
+        route_path = _extract_route_path(request)
 
         # Store the bare trace ID; GCPFormatter is responsible for building
         # the full "projects/<id>/traces/<trace_id>" resource name when it has
@@ -180,6 +234,7 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
         span_tok = formatter.request_span.set(span_id)
         sampled_tok = formatter.request_trace_sampled.set(sampled)
         email_tok = formatter.request_user_email.set(user_email)
+        route_tok = formatter.request_route.set(route_path)
 
         status_code = 500
         start = time.perf_counter()
@@ -201,6 +256,7 @@ class GCPRequestLoggingMiddleware(BaseHTTPMiddleware):
             formatter.request_span.reset(span_tok)
             formatter.request_trace_sampled.reset(sampled_tok)
             formatter.request_user_email.reset(email_tok)
+            formatter.request_route.reset(route_tok)
 
     # ------------------------------------------------------------------
     # Internal helpers

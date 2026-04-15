@@ -404,7 +404,214 @@ class TestMiddlewareIAPPropagation(unittest.TestCase):
         client.get("/")
 
         for entry in self._lines():
-            self.assertNotIn("logging.googleapis.com/labels", entry)
+            self.assertNotIn(
+                "authenticated_user_email",
+                entry.get("logging.googleapis.com/labels", {}),
+            )
+
+
+class TestGCPFormatterRoute(unittest.TestCase):
+    def _make_handler(self) -> tuple[logging.Logger, io.StringIO]:
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(formatter.GCPFormatter(project_id="test-project"))
+        log = logging.getLogger(f"test_route_{id(buf)}")
+        log.handlers = [handler]
+        log.propagate = False
+        log.setLevel(logging.DEBUG)
+        return log, buf
+
+    def test_route_in_labels(self):
+        log, buf = self._make_handler()
+        tok = formatter.request_route.set("/api/user/{user_id}/task/{task_id}")
+        try:
+            log.info("request with route")
+        finally:
+            formatter.request_route.reset(tok)
+
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(
+            payload["logging.googleapis.com/labels"]["starlette.dev/route"],
+            "/api/user/{user_id}/task/{task_id}",
+        )
+
+    def test_no_labels_when_no_route(self):
+        log, buf = self._make_handler()
+        log.info("request without route")
+        payload = json.loads(buf.getvalue())
+        self.assertNotIn("logging.googleapis.com/labels", payload)
+
+    def test_route_and_email_share_labels_dict(self):
+        log, buf = self._make_handler()
+        route_tok = formatter.request_route.set("/items/{item_id}")
+        email_tok = formatter.request_user_email.set("user@example.com")
+        try:
+            log.info("combined labels")
+        finally:
+            formatter.request_route.reset(route_tok)
+            formatter.request_user_email.reset(email_tok)
+
+        payload = json.loads(buf.getvalue())
+        labels = payload["logging.googleapis.com/labels"]
+        self.assertEqual(labels["starlette.dev/route"], "/items/{item_id}")
+        self.assertEqual(labels["authenticated_user_email"], "user@example.com")
+
+
+class TestFindRouteTemplate(unittest.TestCase):
+    def _make_scope(self, path: str, root_path: str = "") -> dict:
+        return {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "root_path": root_path,
+            "path_params": {},
+        }
+
+    def test_simple_route_no_params(self):
+        from starlette.routing import Route, Router
+
+        router = Router(routes=[Route("/health", lambda r: None)])
+        result = middleware._find_route_template(router, self._make_scope("/health"))
+        self.assertEqual(result, "/health")
+
+    def test_simple_route_with_params(self):
+        from starlette.routing import Route, Router
+
+        router = Router(routes=[Route("/user/{user_id}", lambda r: None)])
+        result = middleware._find_route_template(router, self._make_scope("/user/42"))
+        self.assertEqual(result, "/user/{user_id}")
+
+    def test_nested_mount(self):
+        from starlette.routing import Mount, Route, Router
+
+        inner = Router(routes=[Route("/task/{task_id}", lambda r: None)])
+        router = Router(routes=[Mount("/api/user/{user_id}", app=inner)])
+        result = middleware._find_route_template(
+            router, self._make_scope("/api/user/123/task/abc")
+        )
+        self.assertEqual(result, "/api/user/{user_id}/task/{task_id}")
+
+    def test_no_match_returns_none(self):
+        from starlette.routing import Route, Router
+
+        router = Router(routes=[Route("/exists", lambda r: None)])
+        result = middleware._find_route_template(
+            router, self._make_scope("/does-not-exist")
+        )
+        self.assertIsNone(result)
+
+    def test_extract_route_path_includes_root_path(self):
+        from starlette.requests import Request
+        from starlette.routing import Route, Router
+
+        router = Router(routes=[Route("/items/{item_id}", lambda r: None)])
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/items/99",
+            "root_path": "/v1",
+            "query_string": b"",
+            "headers": [],
+            "path_params": {},
+            "app": router,
+        }
+        request = Request(scope)
+        self.assertEqual(
+            middleware._extract_route_path(request), "/v1/items/{item_id}"
+        )
+
+    def test_extract_route_path_no_match_returns_empty(self):
+        from starlette.requests import Request
+        from starlette.routing import Route, Router
+
+        router = Router(routes=[Route("/exists", lambda r: None)])
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/missing",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [],
+            "path_params": {},
+            "app": router,
+        }
+        request = Request(scope)
+        self.assertEqual(middleware._extract_route_path(request), "")
+
+
+class TestMiddlewareRoutePropagation(unittest.TestCase):
+    def setUp(self):
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def user_task(request: Request):
+            logging.getLogger("app").info("inside handler")
+            return JSONResponse({"ok": True})
+
+        self.app = Starlette(
+            routes=[Route("/api/user/{user_id}/task/{task_id}", user_task)]
+        )
+        self.app.add_middleware(
+            middleware.GCPRequestLoggingMiddleware,
+            project_id="my-project",
+        )
+
+        self.buf = io.StringIO()
+        self.handler = logging.StreamHandler(self.buf)
+        self.handler.setFormatter(formatter.GCPFormatter(project_id="my-project"))
+        self.root = logging.getLogger()
+        self.root.addHandler(self.handler)
+        self.root.setLevel(logging.DEBUG)
+
+    def tearDown(self):
+        self.root.removeHandler(self.handler)
+
+    def _lines(self) -> list[dict]:
+        return [
+            json.loads(line)
+            for line in self.buf.getvalue().strip().splitlines()
+            if line.strip()
+        ]
+
+    def test_route_label_on_all_log_entries(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        client.get("/api/user/123/task/abc")
+
+        app_entries = [
+            entry
+            for entry in self._lines()
+            if entry.get("logger", "").startswith(("app", "starlette_gcp_logging"))
+        ]
+        self.assertGreaterEqual(len(app_entries), 2)
+        for entry in app_entries:
+            self.assertEqual(
+                entry.get("logging.googleapis.com/labels", {}).get(
+                    "starlette.dev/route"
+                ),
+                "/api/user/{user_id}/task/{task_id}",
+            )
+
+    def test_no_route_label_on_unmatched_path(self):
+        from starlette.testclient import TestClient
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        client.get("/does-not-exist")
+
+        mw_entries = [
+            entry
+            for entry in self._lines()
+            if entry.get("logger", "").startswith("starlette_gcp_logging")
+        ]
+        self.assertGreaterEqual(len(mw_entries), 1)
+        for entry in mw_entries:
+            self.assertNotIn(
+                "starlette.dev/route",
+                entry.get("logging.googleapis.com/labels", {}),
+            )
 
 
 if __name__ == "__main__":

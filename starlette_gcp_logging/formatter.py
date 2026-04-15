@@ -39,6 +39,11 @@ request_trace_sampled: ContextVar[bool] = ContextVar("gcp_trace_sampled", defaul
 #: (``x-goog-authenticated-user-email`` or ``x-serverless-authorization``).
 request_user_email: ContextVar[str] = ContextVar("gcp_user_email", default="")
 
+#: Starlette route path template, e.g. ``"/api/user/{user_id}/task/{task_id}"``.
+#: Includes ``root_path`` when one is present.  Set to ``""`` when the route
+#: cannot be resolved (e.g. for 404 responses).
+request_route: ContextVar[str] = ContextVar("gcp_route", default="")
+
 # ---------------------------------------------------------------------------
 # Python log-level → GCP severity mapping
 # ---------------------------------------------------------------------------
@@ -155,6 +160,12 @@ class GCPFormatter(logging.Formatter):
             payload["logging.googleapis.com/labels"]["authenticated_user_email"] = (
                 user_email
             )
+
+        # -- Starlette route template ---------------------------------
+        route = request_route.get()
+        if route:
+            payload.setdefault("logging.googleapis.com/labels", {})
+            payload["logging.googleapis.com/labels"]["starlette.dev/route"] = route
 
         # -- Exception / stack info -----------------------------------
         if record.exc_info and record.exc_info[0] is not None:
