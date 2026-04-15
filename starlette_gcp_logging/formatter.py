@@ -42,7 +42,7 @@ request_user_email: ContextVar[str] = ContextVar("gcp_user_email", default="")
 #: Starlette route path template, e.g. ``"/api/user/{user_id}/task/{task_id}"``.
 #: Includes ``root_path`` when one is present.  Set to ``""`` when the route
 #: cannot be resolved (e.g. for 404 responses).
-request_route: ContextVar[str] = ContextVar("gcp_route", default="")
+request_route: ContextVar[str] = ContextVar("starlette_route", default="")
 
 # ---------------------------------------------------------------------------
 # Python log-level → GCP severity mapping
